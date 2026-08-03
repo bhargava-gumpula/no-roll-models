@@ -549,3 +549,38 @@ Updated at the end of each implementation phase.
   legibility; the full-page "missing API key" / "failed to load Google Maps"
   states (which replace the whole page, not just the sidebar) were likewise
   left as-is.
+
+  Follow-up fix, at the user's request ("old routes are not removed - if I
+  find A to B, then B to C, it keeps A to B in blue"): root-caused to a
+  well-known Google Places Autocomplete gotcha - `place_changed` only fires
+  when the user actually clicks/selects a dropdown suggestion, not on every
+  keystroke. The origin/destination `<input>`s had no `onChange` handler, so
+  if a user retyped over an old address and pressed Enter or clicked away
+  without picking a fresh suggestion, React's `origin`/`destination` state
+  silently kept pointing at the *previous* selected place (say, A and B)
+  while the input visually showed new text - so re-clicking "Find safer
+  route" just recomputed and redrew the same old A-to-B route instead of
+  erroring or waiting for a real B-to-C selection. Fixed by wiring an
+  `onChange` on both inputs (`handleAddressInputChange`) that immediately
+  clears the corresponding coordinate to `null` on every keystroke -
+  Google's own programmatic update of the input's text when a suggestion
+  *is* picked doesn't fire a native `input` event, so this only fires on
+  genuine user typing, not on a real selection - which also disables the
+  "Find safer route" button (`disabled={!origin || !destination || ...}`)
+  until a fresh, valid pick is made. Also introduced `updateOrigin`/
+  `updateDestination` wrapper setters (used by both `onPlaceChanged` and the
+  new `onChange`) that clear `routeComparison`/`routingError` alongside the
+  coordinate, so any previously-drawn route disappears from the map the
+  instant a new valid point is chosen rather than lingering until the next
+  search resolves. Separately hardened `handleFindRoute` against a genuine
+  race condition (rapidly re-clicking "Find safer route" before an earlier,
+  slower lookup has resolved) with a monotonically-increasing
+  `routeRequestIdRef` - a request's result/error is only applied to state if
+  no newer request has started since, so an older, slow in-flight response
+  can never clobber a newer one. (An earlier version of the first fix used a
+  `useEffect([origin, destination])` calling `setState` directly, which
+  `eslint-plugin-react-hooks`'s `set-state-in-effect` rule correctly flagged
+  as effect-triggered cascading renders; moved the logic into the setter
+  functions themselves instead, which is both simpler and lint-clean.) All
+  61 tests, `npm run build`, and `npm run lint` pass; this is a browser/DOM
+  event-ordering fix with no pure-logic unit to test in Vitest.

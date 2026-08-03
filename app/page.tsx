@@ -61,6 +61,11 @@ export default function Home() {
   const originAutocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
   const destinationAutocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
   const directionsServiceRef = useRef<google.maps.DirectionsService | null>(null);
+  // Bumped on every handleFindRoute call so a slow, older request can never
+  // overwrite state with a stale result after a newer request has already
+  // resolved (e.g. clicking "Find safer route" again before the first
+  // in-flight lookup finishes).
+  const routeRequestIdRef = useRef(0);
 
   useEffect(() => {
     fetch("/api/layers")
@@ -77,8 +82,38 @@ export default function Home() {
     return location ? { lat: location.lat(), lng: location.lng() } : null;
   }
 
+  // Every place origin/destination can change - a fresh Autocomplete pick,
+  // or the input being edited away from its last valid pick (see
+  // `handleAddressInputChange` below) - also drops any previously-drawn
+  // route immediately, rather than leaving a stale one on the map until the
+  // next search resolves.
+  function updateOrigin(value: LatLng | null) {
+    setOrigin(value);
+    setRouteComparison(null);
+    setRoutingError(null);
+  }
+
+  function updateDestination(value: LatLng | null) {
+    setDestination(value);
+    setRouteComparison(null);
+    setRoutingError(null);
+  }
+
+  // Google's Places `place_changed` event only fires when the user picks a
+  // suggestion from the dropdown - if they instead retype over an address
+  // and just hit Enter or click away, our `origin`/`destination` state would
+  // otherwise silently keep pointing at the *old* selected place, so
+  // re-clicking "Find safer route" would just recompute and redraw the same
+  // old route. Clearing on every keystroke forces a fresh, real selection
+  // before a new search can run.
+  function handleAddressInputChange(which: "origin" | "destination") {
+    if (which === "origin") updateOrigin(null);
+    else updateDestination(null);
+  }
+
   async function handleFindRoute() {
     if (!origin || !destination || !data) return;
+    const requestId = ++routeRequestIdRef.current;
     setRoutingLoading(true);
     setRoutingError(null);
     setRouteComparison(null);
@@ -88,11 +123,13 @@ export default function Home() {
       }
       const requestRoute = createGoogleDirectionsRouter(directionsServiceRef.current);
       const comparison = await computeRouteComparison(requestRoute, origin, destination, data.dangerZones);
+      if (requestId !== routeRequestIdRef.current) return; // a newer request already won
       setRouteComparison(comparison);
     } catch (err) {
+      if (requestId !== routeRequestIdRef.current) return;
       setRoutingError(err instanceof Error ? err.message : "Failed to compute a route");
     } finally {
-      setRoutingLoading(false);
+      if (requestId === routeRequestIdRef.current) setRoutingLoading(false);
     }
   }
 
@@ -133,7 +170,7 @@ export default function Home() {
               <Autocomplete
                 onLoad={(ac) => (originAutocompleteRef.current = ac)}
                 onPlaceChanged={() =>
-                  setOrigin(placeToLatLng(originAutocompleteRef.current?.getPlace()))
+                  updateOrigin(placeToLatLng(originAutocompleteRef.current?.getPlace()))
                 }
                 bounds={SF_BOUNDS}
                 options={{ strictBounds: false }}
@@ -141,13 +178,14 @@ export default function Home() {
                 <input
                   type="text"
                   placeholder="Start address (A)"
+                  onChange={() => handleAddressInputChange("origin")}
                   className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-black"
                 />
               </Autocomplete>
               <Autocomplete
                 onLoad={(ac) => (destinationAutocompleteRef.current = ac)}
                 onPlaceChanged={() =>
-                  setDestination(placeToLatLng(destinationAutocompleteRef.current?.getPlace()))
+                  updateDestination(placeToLatLng(destinationAutocompleteRef.current?.getPlace()))
                 }
                 bounds={SF_BOUNDS}
                 options={{ strictBounds: false }}
@@ -155,6 +193,7 @@ export default function Home() {
                 <input
                   type="text"
                   placeholder="Destination address (B)"
+                  onChange={() => handleAddressInputChange("destination")}
                   className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-black"
                 />
               </Autocomplete>
