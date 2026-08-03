@@ -1,5 +1,5 @@
 import type { RawRoute, RequestRouteFn } from "./routing";
-import type { LatLng } from "./types";
+import type { LatLng, RouteStep } from "./types";
 
 /**
  * Google's Directions API, in `BICYCLING` mode, will sometimes propose a
@@ -36,18 +36,45 @@ export function isBikeableRoute(route: google.maps.DirectionsRoute): boolean {
   return route.legs.every((leg) => leg.steps.every((step) => !isFerryStep(step)));
 }
 
+// Google's step instructions arrive as small HTML fragments (e.g. `Turn
+// <b>right</b> onto <b>Valencia St</b>`, sometimes with a
+// `<div style="font-size:0.9em">Restricted usage road</div>` sub-line) -
+// this app just needs plain, readable text for the turn-by-turn panel.
+function stripInstructionsHtml(html: string): string {
+  return html
+    .replace(/<div[^>]*>/gi, " - ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractSteps(route: google.maps.DirectionsRoute): RouteStep[] {
+  return route.legs.flatMap((leg) =>
+    leg.steps.map((step) => ({
+      instructions: stripInstructionsHtml(step.instructions ?? ""),
+      distanceMeters: step.distance?.value ?? 0,
+      durationSeconds: step.duration?.value ?? 0,
+    }))
+  );
+}
+
 /**
- * Pulls a flat path + total distance/duration out of a single Google
- * `DirectionsRoute`, summing across every leg (there's one leg per
- * waypoint segment) so multi-waypoint "safer" routes report their full
- * distance/time, not just the first leg's.
+ * Pulls a flat path + total distance/duration + turn-by-turn steps out of a
+ * single Google `DirectionsRoute`, summing distance/duration across every
+ * leg (there's one leg per waypoint segment) so multi-waypoint "safer"
+ * routes report their full trip, not just the first leg's.
  */
 export function extractRoute(route: google.maps.DirectionsRoute): RawRoute {
   const path: LatLng[] = route.overview_path.map((p) => ({ lat: p.lat(), lng: p.lng() }));
   const distanceMeters = route.legs.reduce((sum, leg) => sum + (leg.distance?.value ?? 0), 0);
   const durationSeconds = route.legs.reduce((sum, leg) => sum + (leg.duration?.value ?? 0), 0);
+  const steps = extractSteps(route);
 
-  return { path, distanceMeters, durationSeconds };
+  return { path, distanceMeters, durationSeconds, steps };
 }
 
 /**

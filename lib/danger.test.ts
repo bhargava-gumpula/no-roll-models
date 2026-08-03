@@ -3,20 +3,35 @@ import {
   assessRouteRisk,
   computeCompositeDangerZones,
   computeRoadNetworkSafety,
+  findHighwayApproach,
   suggestAvoidanceWaypoint,
+  suggestBikeLaneWaypoint,
+  suggestHighwayAvoidanceWaypoint,
+  summarizeBikeLanesUsed,
+  summarizeNeighborhoodsAvoided,
 } from "./danger";
-import { haversineMeters } from "./geo";
+import { distanceToPathMeters, haversineMeters } from "./geo";
+import { REAL_SF_BIKE_LANES } from "./dataSources/sfmtaBikeLanes";
 import { REAL_SF_ROADS } from "./dataSources/osmRoads";
-import { ALL_MOCK_CRASHES, DEMO_CITY, MOCK_BIKE_LANE_SEGMENTS, MOCK_HIGHWAY_SEGMENTS } from "./mockData";
-import type { DangerZone } from "./types";
+import { ALL_MOCK_CRASHES, DEMO_CITY, MOCK_HIGHWAY_SEGMENTS } from "./mockData";
+import type { BikeLaneSegment, DangerZone, HighwaySegment, NamedDangerLocation, RouteRiskResult } from "./types";
 
-const zones = computeCompositeDangerZones(ALL_MOCK_CRASHES, MOCK_BIKE_LANE_SEGMENTS, MOCK_HIGHWAY_SEGMENTS);
+const zones = computeCompositeDangerZones(ALL_MOCK_CRASHES, REAL_SF_BIKE_LANES, MOCK_HIGHWAY_SEGMENTS);
 const roadSegments = computeRoadNetworkSafety(
   ALL_MOCK_CRASHES,
-  MOCK_BIKE_LANE_SEGMENTS,
+  REAL_SF_BIKE_LANES,
   MOCK_HIGHWAY_SEGMENTS,
   REAL_SF_ROADS
 );
+
+function makeZone(overrides: Partial<DangerZone> & Pick<DangerZone, "id" | "center" | "weight">): DangerZone {
+  return {
+    radiusMeters: 300,
+    factorScores: { crashDensity: 0, bikeInfrastructure: 0, highwayExposure: 0 },
+    crashIds: [],
+    ...overrides,
+  };
+}
 
 describe("computeCompositeDangerZones", () => {
   it("only emits zones for genuinely risky clusters, not the whole city", () => {
@@ -69,7 +84,7 @@ describe("computeCompositeDangerZones", () => {
   });
 
   it("is deterministic given the same inputs", () => {
-    const again = computeCompositeDangerZones(ALL_MOCK_CRASHES, MOCK_BIKE_LANE_SEGMENTS, MOCK_HIGHWAY_SEGMENTS);
+    const again = computeCompositeDangerZones(ALL_MOCK_CRASHES, REAL_SF_BIKE_LANES, MOCK_HIGHWAY_SEGMENTS);
     expect(again).toEqual(zones);
   });
 });
@@ -99,9 +114,9 @@ describe("computeRoadNetworkSafety", () => {
   });
 
   it("known named corridors from the old curated list are still present under their real geometry", () => {
-    // Spot-check a few streets our original hand-curated MOCK_BIKE_LANE_SEGMENTS
-    // / MOCK_HIGHWAY_SEGMENTS also modeled, confirming the swap to real OSM
-    // geometry didn't drop the roads this app has always cared about.
+    // Spot-check a few streets our original hand-curated bike-lane/highway
+    // mock data also modeled, confirming the swap to real OSM road geometry
+    // didn't drop the roads this app has always cared about.
     const names = roadSegments.map((s) => s.name);
     expect(names).toContain("Valencia Street Bikeway");
     expect(names).toContain("Van Ness Avenue");
@@ -156,7 +171,7 @@ describe("computeRoadNetworkSafety", () => {
   it("is deterministic given the same inputs", () => {
     const again = computeRoadNetworkSafety(
       ALL_MOCK_CRASHES,
-      MOCK_BIKE_LANE_SEGMENTS,
+      REAL_SF_BIKE_LANES,
       MOCK_HIGHWAY_SEGMENTS,
       REAL_SF_ROADS
     );
@@ -200,5 +215,175 @@ describe("suggestAvoidanceWaypoint", () => {
     const waypoint = suggestAvoidanceWaypoint(zone, path);
     const distFromCenter = haversineMeters(waypoint, zone.center);
     expect(distFromCenter).toBeGreaterThan(zone.radiusMeters);
+  });
+});
+
+describe("findHighwayApproach / suggestHighwayAvoidanceWaypoint", () => {
+  const freeway: HighwaySegment = {
+    id: "hwy-test",
+    name: "Test Freeway",
+    type: "freeway",
+    typicalSpeedMph: 55,
+    path: [
+      { lat: 37.78, lng: -122.42 },
+      { lat: 37.79, lng: -122.42 },
+    ],
+  };
+
+  it("finds an approach when the route runs directly alongside a highway", () => {
+    const path = [
+      { lat: 37.78, lng: -122.4201 },
+      { lat: 37.79, lng: -122.4201 },
+    ];
+    const approach = findHighwayApproach(path, [freeway]);
+    expect(approach).not.toBeNull();
+    expect(approach?.highway.id).toBe("hwy-test");
+    expect(approach!.distanceMeters).toBeLessThan(160);
+  });
+
+  it("returns null when the route is nowhere near any highway", () => {
+    const path = [
+      { lat: 37.6, lng: -122.1 },
+      { lat: 37.61, lng: -122.11 },
+    ];
+    expect(findHighwayApproach(path, [freeway])).toBeNull();
+  });
+
+  it("suggests a waypoint that ends up further from the highway than the current path", () => {
+    const path = [
+      { lat: 37.78, lng: -122.4201 },
+      { lat: 37.79, lng: -122.4201 },
+    ];
+    const approach = findHighwayApproach(path, [freeway])!;
+    const waypoint = suggestHighwayAvoidanceWaypoint(approach, path);
+    const d = distanceToPathMeters(approach.closestPoint, [waypoint]);
+    expect(d).toBeGreaterThan(approach.distanceMeters);
+  });
+});
+
+describe("summarizeBikeLanesUsed", () => {
+  const laneA: BikeLaneSegment = {
+    id: "lane-a",
+    name: "Valencia St",
+    tier: "fullyProtected",
+    path: [
+      { lat: 37.76, lng: -122.4212 },
+      { lat: 37.762, lng: -122.4212 },
+      { lat: 37.764, lng: -122.4212 },
+    ],
+  };
+  const laneB: BikeLaneSegment = {
+    id: "lane-b",
+    name: "Off-route St",
+    tier: "semiProtected",
+    path: [
+      { lat: 37.9, lng: -122.55 },
+      { lat: 37.91, lng: -122.55 },
+    ],
+  };
+
+  it("includes a lane the route runs along for a meaningful stretch", () => {
+    const path = [
+      { lat: 37.759, lng: -122.4212 },
+      { lat: 37.765, lng: -122.4212 },
+    ];
+    const used = summarizeBikeLanesUsed(path, [laneA, laneB]);
+    expect(used.map((u) => u.name)).toEqual(["Valencia St"]);
+    expect(used[0].tier).toBe("fullyProtected");
+  });
+
+  it("excludes a lane the route never comes near", () => {
+    const path = [
+      { lat: 37.759, lng: -122.4212 },
+      { lat: 37.765, lng: -122.4212 },
+    ];
+    const used = summarizeBikeLanesUsed(path, [laneB]);
+    expect(used).toHaveLength(0);
+  });
+
+  it("dedupes by street name, keeping the better tier", () => {
+    const samePathAsUnprotected: BikeLaneSegment = { ...laneA, id: "lane-a-dup", tier: "unprotected" };
+    const path = [
+      { lat: 37.759, lng: -122.4212 },
+      { lat: 37.765, lng: -122.4212 },
+    ];
+    const used = summarizeBikeLanesUsed(path, [samePathAsUnprotected, laneA]);
+    expect(used).toHaveLength(1);
+    expect(used[0]).toEqual({ name: "Valencia St", tier: "fullyProtected" });
+  });
+});
+
+describe("suggestBikeLaneWaypoint", () => {
+  const nearbyLane: BikeLaneSegment = {
+    id: "lane-near",
+    name: "Nearby Protected Ave",
+    tier: "fullyProtected",
+    path: [
+      { lat: 37.771, lng: -122.421 },
+      { lat: 37.772, lng: -122.421 },
+      { lat: 37.773, lng: -122.421 },
+    ],
+  };
+  const farLane: BikeLaneSegment = {
+    id: "lane-far",
+    name: "Far Away Trail",
+    tier: "fullyProtected",
+    path: [
+      { lat: 38.5, lng: -123.5 },
+      { lat: 38.51, lng: -123.5 },
+    ],
+  };
+  const path = [
+    { lat: 37.77, lng: -122.42 },
+    { lat: 37.775, lng: -122.42 },
+  ];
+
+  it("suggests the nearby lane's midpoint, ignoring a lane far off the corridor", () => {
+    const suggestion = suggestBikeLaneWaypoint(path, [nearbyLane, farLane]);
+    expect(suggestion?.laneId).toBe("lane-near");
+  });
+
+  it("returns null when the route already runs along the only nearby lane", () => {
+    const pathAlreadyOnLane = nearbyLane.path;
+    const suggestion = suggestBikeLaneWaypoint(pathAlreadyOnLane, [nearbyLane]);
+    expect(suggestion).toBeNull();
+  });
+
+  it("returns null when no bike lanes are given", () => {
+    expect(suggestBikeLaneWaypoint(path, [])).toBeNull();
+  });
+});
+
+describe("summarizeNeighborhoodsAvoided", () => {
+  it("names a location whose zone the fastest route crosses but this route doesn't", () => {
+    const avoidedZone = makeZone({ id: "z-avoided", center: { lat: 37.8, lng: -122.41 }, weight: 80, radiusMeters: 200 });
+    const stillCrossedZone = makeZone({ id: "z-still", center: { lat: 37.81, lng: -122.42 }, weight: 70, radiusMeters: 200 });
+    const namedLocations: NamedDangerLocation[] = [
+      { name: "Avoided Corner", center: avoidedZone.center },
+      { name: "Still Risky Corner", center: stillCrossedZone.center },
+      { name: "Unrelated Place", center: { lat: 10, lng: 10 } },
+    ];
+    const route: RouteRiskResult = {
+      path: [],
+      distanceMeters: 0,
+      durationSeconds: 0,
+      riskScore: 0,
+      zonesCrossed: [stillCrossedZone],
+      steps: [],
+    };
+    const avoided = summarizeNeighborhoodsAvoided(route, [avoidedZone, stillCrossedZone], namedLocations);
+    expect(avoided).toEqual(["Avoided Corner"]);
+  });
+
+  it("returns an empty list when nothing was avoided", () => {
+    const route: RouteRiskResult = {
+      path: [],
+      distanceMeters: 0,
+      durationSeconds: 0,
+      riskScore: 0,
+      zonesCrossed: [],
+      steps: [],
+    };
+    expect(summarizeNeighborhoodsAvoided(route, [], [])).toEqual([]);
   });
 });

@@ -104,16 +104,55 @@ export type MapLayerId =
   | "highwayExposure"
   | "overallSafety";
 
+/** One turn-by-turn direction, e.g. "Turn right onto Valencia St" for 0.3 mi. */
+export interface RouteStep {
+  instructions: string;
+  distanceMeters: number;
+  durationSeconds: number;
+}
+
+/** A named, real bike lane the route runs along for a meaningful stretch. */
+export interface BikeLaneUsage {
+  name: string;
+  tier: BikeLaneTier;
+}
+
+/** One of the specific, named dangerous areas fed into the danger model (see `lib/mockData.ts`) - used to report which of them a route did/didn't avoid, by name rather than an opaque zone id. */
+export interface NamedDangerLocation {
+  name: string;
+  center: LatLng;
+}
+
 export interface RouteRiskResult {
   path: LatLng[];
   distanceMeters: number;
   durationSeconds: number;
   riskScore: number;
   zonesCrossed: DangerZone[];
+  steps: RouteStep[];
+  /** Real, named protected/semi-protected bike lanes this route runs along for a meaningful stretch - empty for `fastest` unless it happens to already use one. */
+  bikeLanesUsed?: BikeLaneUsage[];
+  /** Named dangerous areas (see `KNOWN_DANGEROUS_LOCATIONS`/`NAMED_DANGEROUS_LOCATIONS` in `lib/mockData.ts`) that Google's default route runs through but this route doesn't - only meaningful for `balancedSafe`/`safest`, always empty for `fastest`. */
+  neighborhoodsAvoided?: string[];
 }
 
-export interface RouteComparison {
+/**
+ * The three route choices offered to the user, from least to most
+ * safety-optimized:
+ * - fastest: Google's own default bike route, untouched.
+ * - balancedSafe ("Overall best safe route"): detours around the worst
+ *   danger zones still on the route, but stops once risk is reasonably low
+ *   or after a bounded number of detours - a middle ground that doesn't
+ *   chase every last zone at the cost of a much longer trip.
+ * - safest ("Absolute safest route"): keeps detouring, continuing from
+ *   wherever balancedSafe left off, until literally no danger zone is
+ *   crossed (or it truly can't do any better) - safety above all else,
+ *   whatever the distance/time cost.
+ */
+export type RouteOptionKind = "fastest" | "balancedSafe" | "safest";
+
+export interface RouteOptions {
   fastest: RouteRiskResult;
+  balancedSafe: RouteRiskResult;
   safest: RouteRiskResult;
-  improvedRiskPercent: number;
 }

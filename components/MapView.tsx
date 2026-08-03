@@ -1,22 +1,45 @@
 "use client";
 
-import { GoogleMap, Marker, Polyline } from "@react-google-maps/api";
+import { Circle, GoogleMap, Marker, Polyline } from "@react-google-maps/api";
 import { useMemo } from "react";
-import type { DangerFactorScores, LatLng, MapLayerId, RoadKind, RoadSafetySegment } from "@/lib/types";
+import type {
+  DangerFactorScores,
+  DangerZone,
+  LatLng,
+  MapLayerId,
+  RoadKind,
+  RoadSafetySegment,
+  RouteOptionKind,
+} from "@/lib/types";
+
+export interface SelectedRouteDisplay {
+  kind: RouteOptionKind;
+  path: LatLng[];
+}
 
 interface MapViewProps {
   center: LatLng;
   isLoaded: boolean;
-  roadSegments: RoadSafetySegment[];
-  activeLayer: MapLayerId;
-  selectedSegmentId: string | null;
-  onSegmentClick?: (segment: RoadSafetySegment) => void;
   origin?: LatLng | null;
   destination?: LatLng | null;
-  /** Google's default bike route, for comparison against `saferRoutePath`. */
-  fastestRoutePath?: LatLng[] | null;
-  /** Our danger-zone-avoiding route - drawn on top of `fastestRoutePath`. */
-  saferRoutePath?: LatLng[] | null;
+  /** The single route currently shown on the map - the UI lets the user switch between the 3 route options, and only the active one is drawn at a time. */
+  selectedRoute?: SelectedRouteDisplay | null;
+  /**
+   * "Neighborhood view" - translucent circles over the same danger zones
+   * used for route-risk scoring (see `computeCompositeDangerZones`). Not
+   * shown by default (the app opens on a stock, uncluttered map), only
+   * rendered when a non-empty `dangerZones` list is passed in.
+   */
+  dangerZones?: DangerZone[];
+  /**
+   * Optional colored safety road-network overlay - not shown by default
+   * (the app opens on a stock, uncluttered map), only rendered when a
+   * non-empty `roadSegments` list is actually passed in.
+   */
+  roadSegments?: RoadSafetySegment[];
+  activeLayer?: MapLayerId;
+  selectedSegmentId?: string | null;
+  onSegmentClick?: (segment: RoadSafetySegment) => void;
 }
 
 const containerStyle = { width: "100%", height: "100%" };
@@ -34,9 +57,11 @@ function lerp(a: number, b: number, t: number) {
 }
 
 /**
- * Green -> yellow -> red gradient for a 0-100 "danger" score. Every road is
- * rendered now (not just flagged danger spots), so the full range matters -
- * a quiet, fully-protected bikeway should actually look green.
+ * Green -> yellow -> red gradient for a 0-100 "danger" score. Shared by the
+ * road-safety overlay (every road is scored, including safe ones, so the
+ * full range matters there) and the "neighborhood view" danger-zone circles
+ * below (which only ever show zones already above the danger threshold, so
+ * in practice those all land in the orange/red end of this same gradient).
  */
 function dangerColor(score: number): string {
   const t = Math.max(0, Math.min(100, score)) / 100;
@@ -57,6 +82,15 @@ const ROAD_WIDTH_BY_KIND: Record<RoadKind, number> = {
   bikeLane: 4,
 };
 
+// Fastest (Google's own route) stays a neutral gray - it's the baseline,
+// not a recommendation. Overall-best is amber (a reasonable middle ground),
+// absolute-safest is green (safety above all else).
+const ROUTE_COLOR_BY_KIND: Record<RouteOptionKind, string> = {
+  fastest: "#64748b",
+  balancedSafe: "#f59e0b",
+  safest: "#16a34a",
+};
+
 function scoreForLayer(factorScores: DangerFactorScores, overall: number, layer: MapLayerId): number {
   switch (layer) {
     case "neighborhoodSafety":
@@ -74,14 +108,14 @@ function scoreForLayer(factorScores: DangerFactorScores, overall: number, layer:
 export default function MapView({
   center,
   isLoaded,
-  roadSegments,
-  activeLayer,
-  selectedSegmentId,
-  onSegmentClick,
   origin,
   destination,
-  fastestRoutePath,
-  saferRoutePath,
+  selectedRoute,
+  dangerZones = [],
+  roadSegments = [],
+  activeLayer = "overallSafety",
+  selectedSegmentId = null,
+  onSegmentClick,
 }: MapViewProps) {
   const lines = useMemo(
     () =>
@@ -102,6 +136,23 @@ export default function MapView({
 
   return (
     <GoogleMap mapContainerStyle={containerStyle} center={center} zoom={13} options={mapOptions}>
+      {dangerZones.map((zone) => (
+        <Circle
+          key={zone.id}
+          center={zone.center}
+          radius={zone.radiusMeters}
+          options={{
+            fillColor: dangerColor(zone.weight),
+            fillOpacity: 0.28,
+            strokeColor: dangerColor(zone.weight),
+            strokeOpacity: 0.75,
+            strokeWeight: 1.5,
+            clickable: false,
+            zIndex: 5,
+          }}
+        />
+      ))}
+
       {lines.map(({ segment, score }) => {
         const isSelected = segment.id === selectedSegmentId;
         const baseWidth = ROAD_WIDTH_BY_KIND[segment.kind];
@@ -121,33 +172,14 @@ export default function MapView({
         );
       })}
 
-      {fastestRoutePath && fastestRoutePath.length > 1 && (
+      {selectedRoute && selectedRoute.path.length > 1 && (
         <Polyline
-          path={fastestRoutePath}
+          path={selectedRoute.path}
           options={{
-            strokeColor: "#64748b",
-            strokeOpacity: 0.9,
-            strokeWeight: 5,
-            zIndex: 30,
-            icons: [
-              {
-                icon: { path: "M 0,-1 0,1", strokeOpacity: 1, scale: 3 },
-                offset: "0",
-                repeat: "14px",
-              },
-            ],
-          }}
-        />
-      )}
-
-      {saferRoutePath && saferRoutePath.length > 1 && (
-        <Polyline
-          path={saferRoutePath}
-          options={{
-            strokeColor: "#1d4ed8",
+            strokeColor: ROUTE_COLOR_BY_KIND[selectedRoute.kind],
             strokeOpacity: 0.95,
             strokeWeight: 5,
-            zIndex: 31,
+            zIndex: 30,
           }}
         />
       )}

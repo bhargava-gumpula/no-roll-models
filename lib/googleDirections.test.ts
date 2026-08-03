@@ -20,6 +20,15 @@ function routeWithSteps(steps: google.maps.DirectionsStep[]): google.maps.Direct
   } as unknown as google.maps.DirectionsRoute;
 }
 
+function stepWithHtml(overrides: Partial<google.maps.DirectionsStep> = {}): google.maps.DirectionsStep {
+  return {
+    ...bikeStep(),
+    distance: { value: 150 },
+    duration: { value: 45 },
+    ...overrides,
+  } as google.maps.DirectionsStep;
+}
+
 describe("isFerryStep", () => {
   it("is false for an ordinary bicycling step", () => {
     expect(isFerryStep(bikeStep())).toBe(false);
@@ -106,5 +115,44 @@ describe("extractRoute", () => {
       { lat: 37.77, lng: -122.42 },
       { lat: 37.78, lng: -122.41 },
     ]);
+  });
+
+  it("flattens turn-by-turn steps across every leg, in order", () => {
+    const route = {
+      legs: [
+        { steps: [stepWithHtml({ instructions: "Head <b>north</b>" })], distance: { value: 0 }, duration: { value: 0 } },
+        { steps: [stepWithHtml({ instructions: "Turn <b>right</b> onto Main St" })], distance: { value: 0 }, duration: { value: 0 } },
+      ],
+      overview_path: [],
+    } as unknown as google.maps.DirectionsRoute;
+
+    const result = extractRoute(route);
+    expect(result.steps).toEqual([
+      { instructions: "Head north", distanceMeters: 150, durationSeconds: 45 },
+      { instructions: "Turn right onto Main St", distanceMeters: 150, durationSeconds: 45 },
+    ]);
+  });
+
+  it("strips HTML tags and decodes common entities from step instructions", () => {
+    const route = routeWithSteps([
+      stepWithHtml({
+        instructions:
+          'Turn <b>left</b> onto <b>Valencia St</b><div style="font-size:0.9em">Restricted usage road</div>',
+      }),
+      stepWithHtml({ instructions: "Ride along Fell &amp; Oak" }),
+      stepWithHtml({ instructions: "Arrive at 123 O&#39;Farrell St &quot;side entrance&quot;" }),
+    ]);
+
+    const result = extractRoute(route);
+    expect(result.steps.map((s) => s.instructions)).toEqual([
+      "Turn left onto Valencia St - Restricted usage road",
+      "Ride along Fell & Oak",
+      'Arrive at 123 O\'Farrell St "side entrance"',
+    ]);
+  });
+
+  it("returns an empty steps array for a route with no steps", () => {
+    const route = routeWithSteps([]);
+    expect(extractRoute(route).steps).toEqual([]);
   });
 });

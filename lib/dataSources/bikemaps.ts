@@ -27,9 +27,9 @@ import type { CrashRecord, IncidentType } from "../types";
  *   Injury" dataset) for non-fatal, jurisdiction-specific crash data -
  *   both typically available as public downloads/APIs with no special
  *   access needed, unlike BikeMaps.
- * - Bike infrastructure quality: city/OSM bike-network GIS layers (e.g.
- *   OSM `cycleway` tags, or a city's official bikeway-network shapefile)
- *   would replace `MOCK_BIKE_LANE_SEGMENTS` in lib/mockData.ts.
+ * - Bike infrastructure quality: already wired up for real - see
+ *   `lib/dataSources/sfmtaBikeLanes.ts`, which replaced the old
+ *   `MOCK_BIKE_LANE_SEGMENTS` with SFMTA's real official bike-network data.
  * - Highway/arterial exposure: OSM `highway=motorway`/`primary` tags, or a
  *   city's road-classification GIS layer, would replace
  *   `MOCK_HIGHWAY_SEGMENTS` in lib/mockData.ts.

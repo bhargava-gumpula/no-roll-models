@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "data:fetch-roads": "node scripts/fetchSfRoads.mjs"
+    "data:fetch-roads": "node scripts/fetchSfRoads.mjs",
+    "data:import-bike-lanes": "node scripts/importSfmtaBikeLanes.mjs"
   },
   "dependencies": {
     "@react-google-maps/api": "^2.20.8",

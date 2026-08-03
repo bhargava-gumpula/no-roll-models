@@ -3,14 +3,17 @@ import { DEMO_CITY } from "./mockData";
 import type {
   BikeLaneSegment,
   BikeLaneTier,
+  BikeLaneUsage,
   CrashRecord,
   DangerFactorScores,
   DangerZone,
   HighwaySegment,
   LatLng,
+  NamedDangerLocation,
   RealRoadSegment,
   RoadKind,
   RoadSafetySegment,
+  RouteRiskResult,
 } from "./types";
 
 const SEVERITY_WEIGHT: Record<number, number> = { 1: 1, 2: 2.5, 3: 5 };
@@ -34,6 +37,19 @@ const BIKE_LANE_TIER_RISK: Record<BikeLaneTier, number> = {
 };
 
 const CRASH_SEARCH_RADIUS_METERS = 260;
+// Crash density used to be normalized against whichever grid cell had the
+// single highest raw density *in the current dataset* - which meant one
+// very dense spot (e.g. several real Tenderloin hotspots close enough
+// together that their 260m search radii overlap and compound) would
+// silently suppress every other area's *relative* score, even genuinely
+// dangerous ones, just by existing. A fixed reference instead keeps crash
+// density on an absolute scale: adding more data never changes what an
+// existing area scores. Calibrated against this app's own mock hazard
+// clusters (lib/mockData.ts) - an isolated, moderately-dense cluster
+// typically lands in the raw ~15-30 range, an ultra-dense compound area (a
+// handful of nearby hotspots whose radii overlap) lands well above that and
+// simply clips at the 100 cap rather than resetting the scale.
+const CRASH_DENSITY_REFERENCE = 22;
 const BIKE_LANE_SEARCH_RADIUS_METERS = 130; // beyond this, treat the block as having no meaningful bike lane
 // Grid resolution used internally for scoring/clustering - finer than the
 // rendered zones, since adjacent risky cells get merged into one bigger
@@ -107,10 +123,77 @@ function scoreCrashDensity(center: LatLng, crashes: CrashRecord[]): { raw: numbe
   return { raw, ids };
 }
 
+// The real SFMTA bike-network dataset (lib/dataSources/sfmtaBikeLanes.ts)
+// has ~5,450 segments, versus a handful of curated highway segments and
+// crash records - a naive "check every segment" nearest-lookup (fine at
+// mock-data scale) turns into the dominant cost of every score* call once
+// this many segments are involved, since it runs once per grid cell *and*
+// once per point along every real road. A simple spatial hash fixes this:
+// bucket every segment by ~150m grid cell (matching the search radius
+// below), then a lookup only has to check the ~9 buckets around the query
+// point instead of the whole dataset. The index is built once per distinct
+// `segments` array (keyed by reference) and reused for every query against
+// it - in practice this means it's built exactly once per server process,
+// since callers always pass the same shared REAL_SF_BIKE_LANES array.
+const BIKE_LANE_BUCKET_METERS = 150;
+const BIKE_LANE_BUCKET_METERS_PER_DEG_LAT = 111_320;
+const BIKE_LANE_BUCKET_METERS_PER_DEG_LNG =
+  111_320 * Math.cos((DEMO_CITY.center.lat * Math.PI) / 180);
+
+interface BikeLaneIndex {
+  segments: BikeLaneSegment[];
+  buckets: Map<string, number[]>;
+}
+
+const bikeLaneIndexCache = new WeakMap<BikeLaneSegment[], BikeLaneIndex>();
+
+function bikeLaneBucketKey(point: LatLng): string {
+  const row = Math.floor((point.lat * BIKE_LANE_BUCKET_METERS_PER_DEG_LAT) / BIKE_LANE_BUCKET_METERS);
+  const col = Math.floor((point.lng * BIKE_LANE_BUCKET_METERS_PER_DEG_LNG) / BIKE_LANE_BUCKET_METERS);
+  return `${row},${col}`;
+}
+
+function buildBikeLaneIndex(segments: BikeLaneSegment[]): BikeLaneIndex {
+  const buckets = new Map<string, number[]>();
+  segments.forEach((seg, i) => {
+    const seenKeys = new Set<string>();
+    for (const point of seg.path) {
+      const key = bikeLaneBucketKey(point);
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(i);
+      else buckets.set(key, [i]);
+    }
+  });
+  return { segments, buckets };
+}
+
+function getBikeLaneIndex(segments: BikeLaneSegment[]): BikeLaneIndex {
+  const cached = bikeLaneIndexCache.get(segments);
+  if (cached) return cached;
+  const index = buildBikeLaneIndex(segments);
+  bikeLaneIndexCache.set(segments, index);
+  return index;
+}
+
 function scoreBikeInfrastructure(center: LatLng, segments: BikeLaneSegment[]): number {
+  const index = getBikeLaneIndex(segments);
+  const row = Math.floor((center.lat * BIKE_LANE_BUCKET_METERS_PER_DEG_LAT) / BIKE_LANE_BUCKET_METERS);
+  const col = Math.floor((center.lng * BIKE_LANE_BUCKET_METERS_PER_DEG_LNG) / BIKE_LANE_BUCKET_METERS);
+
+  const candidateIndices = new Set<number>();
+  for (let dRow = -1; dRow <= 1; dRow++) {
+    for (let dCol = -1; dCol <= 1; dCol++) {
+      const bucket = index.buckets.get(`${row + dRow},${col + dCol}`);
+      if (bucket) for (const i of bucket) candidateIndices.add(i);
+    }
+  }
+
   let best = Infinity;
   let bestTier: BikeLaneTier = "none";
-  for (const seg of segments) {
+  for (const i of candidateIndices) {
+    const seg = index.segments[i];
     const d = distanceToPathMeters(center, seg.path);
     if (d < best) {
       best = d;
@@ -135,9 +218,8 @@ function scoreHighwayExposure(center: LatLng, segments: HighwaySegment[]): numbe
   return Math.min(100, worst);
 }
 
-function normalize(values: number[]): number[] {
-  const max = Math.max(...values, 1e-9);
-  return values.map((v) => Math.min(100, (v / max) * 100));
+function normalizeCrashDensity(raw: number): number {
+  return Math.min(100, (raw / CRASH_DENSITY_REFERENCE) * 100);
 }
 
 // Orthogonal-only adjacency (not diagonal): diagonal touches tend to bridge
@@ -270,10 +352,8 @@ function computeQualifyingClusters(
     };
   });
 
-  const normalizedCrashDensity = normalize(cells.map((c) => c.crashDensityRaw));
-
-  const scored: ScoredCell[] = cells.map((cell, i) => {
-    const crashDensity = normalizedCrashDensity[i];
+  const scored: ScoredCell[] = cells.map((cell) => {
+    const crashDensity = normalizeCrashDensity(cell.crashDensityRaw);
     const bikeInfrastructure = cell.bikeInfrastructureRisk;
     const highwayExposure = cell.highwayExposureRisk;
     const composite =
@@ -349,17 +429,22 @@ function factorScoresOf(points: PointFactorScores[]): DangerFactorScores {
 }
 
 // A road's own OSM classification implies a baseline exposure/protection
-// level even when it isn't one of our hand-curated MOCK_HIGHWAY_SEGMENTS /
-// MOCK_BIKE_LANE_SEGMENTS entries (those only cover a handful of named
-// corridors we specifically modeled; the real road network pulled from OSM
-// in lib/dataSources/osmRoads.ts covers ~200 named streets, most of which
-// have no curated entry to look proximity up against). Without this, e.g.
+// level even when it isn't near one of our hand-curated MOCK_HIGHWAY_SEGMENTS
+// entries (those only cover a handful of named freeways/arterials we
+// specifically modeled; the real road network pulled from OSM in
+// lib/dataSources/osmRoads.ts covers ~200 named streets, most of which have
+// no curated highway entry to look proximity up against). Without this, e.g.
 // "19th Avenue" (a real, fast, multi-lane arterial) would score
 // highwayExposure=0 just for not being literally one of our 7 curated
-// segments, and any real cycleway with no matching curated tier would score
-// bikeInfrastructure=100 ("no lane at all") despite verifiably having a
-// dedicated bike lane per OSM. These baselines are floors, not overrides -
-// proximity to an actual curated hazard (e.g. running parallel to I-280)
+// highway segments. (Bike infrastructure doesn't need this same fallback for
+// coverage anymore - lib/dataSources/sfmtaBikeLanes.ts is the real, ~5,450-
+// segment SFMTA network itself, not a small curated sample - but a real
+// OSM-tagged cycleway with no *matching* SFMTA record within search radius,
+// e.g. from data being slightly out of sync between the two sources, would
+// still otherwise score bikeInfrastructure=100 ("no lane at all") despite
+// verifiably having a dedicated bike lane per OSM.) These baselines are
+// floors, not overrides - proximity to an actual curated/real hazard (e.g.
+// running parallel to I-280, or a real unprotected block on that street)
 // can still push the score higher.
 const KIND_BASELINE_HIGHWAY_EXPOSURE: Record<RoadKind, number> = {
   freeway: 85,
@@ -412,11 +497,9 @@ export function computeRoadNetworkSafety(
     points: road.path.map((point) => scoreRoadPoint(point, road.kind, crashes, bikeLanes, highways)),
   }));
 
-  const allRawCrashDensities = roadScores.flatMap((r) => r.points.map((p) => p.crashDensityRaw));
-  const maxRawCrashDensity = Math.max(...allRawCrashDensities, 1e-9);
   for (const { points } of roadScores) {
     for (const p of points) {
-      p.crashDensity = Math.min(100, (p.crashDensityRaw / maxRawCrashDensity) * 100);
+      p.crashDensity = normalizeCrashDensity(p.crashDensityRaw);
     }
   }
 
@@ -498,4 +581,171 @@ export function suggestAvoidanceWaypoint(zone: DangerZone, path: LatLng[]): LatL
     lat: zone.center.lat + (dirLat * clearance) / metersPerDegLat,
     lng: zone.center.lng + (dirLng * clearance) / metersPerDegLng,
   };
+}
+
+// How close a route can run to a highway/arterial before it's considered
+// "exposed" to it and worth actively detouring away from - tighter than the
+// influence radius used for the composite danger-zone score
+// (`scoreHighwayExposure` above, 500/250) since this is a direct "you are
+// running right alongside this" check for the "avoid the big highways"
+// detour pass, not a broad area-scoring radius.
+const HIGHWAY_AVOID_INFLUENCE_METERS: Record<HighwaySegment["type"], number> = {
+  freeway: 160,
+  arterial: 90,
+};
+
+export interface HighwayApproach {
+  highway: HighwaySegment;
+  closestPoint: LatLng;
+  distanceMeters: number;
+}
+
+/**
+ * Finds the single closest point where a route path runs alongside a
+ * highway/arterial, restricted to ones within that type's avoidance
+ * influence radius - i.e. "is this route currently exposed to a highway,
+ * and if so, which one and where." Returns null if the route doesn't come
+ * close enough to any of them to be worth detouring for.
+ */
+export function findHighwayApproach(path: LatLng[], highways: HighwaySegment[]): HighwayApproach | null {
+  let best: HighwayApproach | null = null;
+  for (const highway of highways) {
+    const influence = HIGHWAY_AVOID_INFLUENCE_METERS[highway.type];
+    for (const point of highway.path) {
+      const distanceMeters = distanceToPathMeters(point, path);
+      if (distanceMeters < influence && (!best || distanceMeters < best.distanceMeters)) {
+        best = { highway, closestPoint: point, distanceMeters };
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Same "push a waypoint past the edge, away from the current line" idea as
+ * `suggestAvoidanceWaypoint`, applied to a highway's closest point of
+ * approach instead of a danger zone's center - lets the detour loop treat
+ * "get away from this freeway" the same way it already treats "get away
+ * from this crash cluster." `path` is the route currently running close to
+ * the highway (i.e. the same path `approach` was computed from).
+ */
+export function suggestHighwayAvoidanceWaypoint(approach: HighwayApproach, path: LatLng[]): LatLng {
+  return suggestAvoidanceWaypoint(
+    {
+      id: `highway-${approach.highway.id}`,
+      center: approach.closestPoint,
+      radiusMeters: HIGHWAY_AVOID_INFLUENCE_METERS[approach.highway.type],
+      weight: 0,
+      factorScores: { crashDensity: 0, bikeInfrastructure: 0, highwayExposure: 100 },
+      crashIds: [],
+    },
+    path
+  );
+}
+
+// A lane counts as "used" by a route if a meaningful fraction of the lane's
+// own points run within this distance of the route's path - not just one
+// point (a street the route merely crosses perpendicular to, once, wouldn't
+// meaningfully use it) and not the full length (real SFMTA segments are
+// often just one block, so requiring 100% overlap would miss lanes the
+// route joins/leaves mid-block).
+const BIKE_LANE_USED_THRESHOLD_METERS = 35;
+const BIKE_LANE_USED_MIN_FRACTION = 0.4;
+
+function bikeLaneRunsAlongPath(lane: BikeLaneSegment, path: LatLng[]): boolean {
+  if (lane.path.length === 0) return false;
+  const closeCount = lane.path.filter((p) => distanceToPathMeters(p, path) <= BIKE_LANE_USED_THRESHOLD_METERS).length;
+  return closeCount / lane.path.length >= BIKE_LANE_USED_MIN_FRACTION;
+}
+
+const BIKE_LANE_TIER_RANK: Record<BikeLaneTier, number> = {
+  fullyProtected: 0,
+  semiProtected: 1,
+  unprotected: 2,
+  none: 3,
+};
+
+/**
+ * Which real, named bike lanes (see `lib/dataSources/sfmtaBikeLanes.ts`) a
+ * finished route actually runs along, for display ("state which bike lane
+ * you took"). `bikeLanes` is expected to already be filtered to the tiers
+ * worth reporting (fully/semi-protected) - see `/api/layers`, which is also
+ * the same filtered list `suggestBikeLaneWaypoint` below draws candidates
+ * from. Deduplicates by street name, keeping the better tier if the route
+ * touches the same named street's lane more than once.
+ */
+export function summarizeBikeLanesUsed(path: LatLng[], bikeLanes: BikeLaneSegment[]): BikeLaneUsage[] {
+  const byName = new Map<string, BikeLaneTier>();
+  for (const lane of bikeLanes) {
+    if (!bikeLaneRunsAlongPath(lane, path)) continue;
+    const existing = byName.get(lane.name);
+    if (!existing || BIKE_LANE_TIER_RANK[lane.tier] < BIKE_LANE_TIER_RANK[existing]) {
+      byName.set(lane.name, lane.tier);
+    }
+  }
+  return Array.from(byName.entries())
+    .map(([name, tier]) => ({ name, tier }))
+    .sort((a, b) => BIKE_LANE_TIER_RANK[a.tier] - BIKE_LANE_TIER_RANK[b.tier]);
+}
+
+/**
+ * Which named dangerous locations (see `NAMED_DANGEROUS_LOCATIONS` in
+ * `lib/mockData.ts`) a route avoided, for display ("state... which
+ * neighborhood you avoid"). A location counts as avoided if it falls inside
+ * a danger zone that Google's default route crosses but this route
+ * doesn't - i.e. specifically thanks to this route's own detouring, not
+ * just "any named location that exists somewhere on the map."
+ */
+export function summarizeNeighborhoodsAvoided(
+  route: RouteRiskResult,
+  fastestZonesCrossed: DangerZone[],
+  namedLocations: NamedDangerLocation[]
+): string[] {
+  const routeZoneIds = new Set(route.zonesCrossed.map((z) => z.id));
+  const avoided: string[] = [];
+  for (const location of namedLocations) {
+    const inAvoidedZone = fastestZonesCrossed.some(
+      (zone) => !routeZoneIds.has(zone.id) && haversineMeters(location.center, zone.center) <= zone.radiusMeters
+    );
+    if (inAvoidedZone) avoided.push(location.name);
+  }
+  return avoided;
+}
+
+// How far off a route's current path a candidate protected bike lane's
+// midpoint can be and still be considered "roughly on the way" rather than
+// a wild detour to go pick it up.
+const BIKE_LANE_NUDGE_CORRIDOR_METERS = 550;
+
+export interface BikeLaneNudgeSuggestion {
+  waypoint: LatLng;
+  laneId: string;
+}
+
+/**
+ * Suggests a waypoint through the best nearby protected/semi-protected bike
+ * lane (see `BIKE_LANE_TIER_RANK` - fully-protected preferred) the route
+ * isn't already using, to nudge Google's router onto it - "favor the routes
+ * with a bike lane." Only considers lanes within `BIKE_LANE_NUDGE_CORRIDOR_METERS`
+ * of the current path, so this can't turn into a large detour just to touch
+ * a bike lane far off the way. Returns null once nothing nearby is worth
+ * suggesting (already using it, or nothing close enough).
+ */
+export function suggestBikeLaneWaypoint(
+  path: LatLng[],
+  bikeLanes: BikeLaneSegment[]
+): BikeLaneNudgeSuggestion | null {
+  let best: { lane: BikeLaneSegment; midpoint: LatLng; distanceMeters: number } | null = null;
+  for (const lane of bikeLanes) {
+    if (lane.path.length === 0 || bikeLaneRunsAlongPath(lane, path)) continue;
+    const midpoint = lane.path[Math.floor(lane.path.length / 2)];
+    const distanceMeters = distanceToPathMeters(midpoint, path);
+    if (distanceMeters > BIKE_LANE_NUDGE_CORRIDOR_METERS) continue;
+    const better =
+      !best ||
+      BIKE_LANE_TIER_RANK[lane.tier] < BIKE_LANE_TIER_RANK[best.lane.tier] ||
+      (BIKE_LANE_TIER_RANK[lane.tier] === BIKE_LANE_TIER_RANK[best.lane.tier] && distanceMeters < best.distanceMeters);
+    if (better) best = { lane, midpoint, distanceMeters };
+  }
+  return best ? { waypoint: best.midpoint, laneId: best.lane.id } : null;
 }

@@ -1,14 +1,9 @@
 import { describe, expect, it } from "vitest";
-import {
-  ALL_MOCK_CRASHES,
-  DEMO_CITY,
-  MOCK_BIKE_LANE_SEGMENTS,
-  MOCK_HIGHWAY_SEGMENTS,
-} from "./mockData";
+import { ALL_MOCK_CRASHES, DEMO_CITY, MOCK_HIGHWAY_SEGMENTS } from "./mockData";
 
 describe("ALL_MOCK_CRASHES", () => {
   it("has a stable, expected count (seeded RNG determinism)", () => {
-    expect(ALL_MOCK_CRASHES.length).toBe(128);
+    expect(ALL_MOCK_CRASHES.length).toBe(349);
   });
 
   it("has unique ids", () => {
@@ -35,24 +30,6 @@ describe("ALL_MOCK_CRASHES", () => {
       expect(crash.position.lat).toBeLessThan(DEMO_CITY.bounds.north + margin);
       expect(crash.position.lng).toBeGreaterThan(DEMO_CITY.bounds.west - margin);
       expect(crash.position.lng).toBeLessThan(DEMO_CITY.bounds.east + margin);
-    }
-  });
-});
-
-describe("MOCK_BIKE_LANE_SEGMENTS", () => {
-  const validTiers = new Set(["fullyProtected", "semiProtected", "unprotected", "none"]);
-
-  it("has at least one segment per tier used in the design", () => {
-    const tiers = new Set(MOCK_BIKE_LANE_SEGMENTS.map((s) => s.tier));
-    expect(tiers.has("fullyProtected")).toBe(true);
-    expect(tiers.has("semiProtected")).toBe(true);
-    expect(tiers.has("unprotected")).toBe(true);
-  });
-
-  it("every segment has a valid tier and at least 2 path points", () => {
-    for (const seg of MOCK_BIKE_LANE_SEGMENTS) {
-      expect(validTiers.has(seg.tier)).toBe(true);
-      expect(seg.path.length).toBeGreaterThanOrEqual(2);
     }
   });
 });

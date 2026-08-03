@@ -1,10 +1,4 @@
-import type {
-  BikeLaneSegment,
-  CrashRecord,
-  HighwaySegment,
-  IncidentType,
-  Severity,
-} from "./types";
+import type { CrashRecord, HighwaySegment, IncidentType, NamedDangerLocation, Severity } from "./types";
 
 /**
  * Demo dataset centered on San Francisco. This is synthetic data shaped like
@@ -17,10 +11,16 @@ import type {
 export const DEMO_CITY = {
   name: "San Francisco, CA",
   center: { lat: 37.7749, lng: -122.4194 },
+  // South/east were widened from the original Phase-0 box (37.742/-122.388)
+  // to reach Bayview (3rd St) and Sunnydale/Visitacion Valley, needed once
+  // KNOWN_DANGEROUS_LOCATIONS below added real hotspots down there - the
+  // danger-zone grid only ever samples inside these bounds, so a hotspot
+  // outside them would silently never surface no matter how much crash data
+  // it has.
   bounds: {
     north: 37.808,
-    south: 37.742,
-    east: -122.388,
+    south: 37.705,
+    east: -122.383,
     west: -122.462,
   },
 };
@@ -76,6 +76,61 @@ const HAZARD_CLUSTERS: {
   { name: "Geary Blvd", center: { lat: 37.7827, lng: -122.4438 }, points: 9, spreadMeters: 350, severityBias: 0.5 },
   { name: "Golden Gate Park panhandle", center: { lat: 37.7719, lng: -122.4459 }, points: 6, spreadMeters: 180, severityBias: 0.15 },
 ];
+
+// Specific, user-provided list of San Francisco locations with known real
+// cycling/pedestrian safety concerns (mostly high-pedestrian-volume
+// Tenderloin/SoMa/Mission/Bayview corridors and BART plazas) - distinct from
+// HAZARD_CLUSTERS above, which is this app's own invented demo shaping.
+// These are fed through the exact same synthetic-crash-generation pipeline
+// (so they surface via the normal composite danger-zone/road-scoring math,
+// same threshold and clustering rules as everywhere else - see
+// COMPOSITE_THRESHOLD in lib/danger.ts) rather than being hardcoded as
+// always-shown zones, so they naturally combine with (and are ranked
+// alongside) any other genuinely risky area the model finds. Coordinates are
+// approximate street/intersection locations, not surveyed - acceptable for
+// this demo's synthetic scoring model (see the "not for real navigation
+// decisions" disclaimer in the UI).
+// spreadMeters is deliberately kept well under CRASH_SEARCH_RADIUS_METERS
+// (260, see lib/danger.ts) for every entry here: `jitter()` scatters points
+// uniformly up to `spreadMeters` in *each* of lat/lng independently, so the
+// true max distance from center is spreadMeters*sqrt(2) - a spread much
+// above ~180 starts pushing a meaningful fraction of points outside the
+// search radius entirely (zero contribution), silently diluting exactly the
+// locations this list means to flag as dangerous.
+const KNOWN_DANGEROUS_LOCATIONS: {
+  name: string;
+  center: { lat: number; lng: number };
+  points: number;
+  spreadMeters: number;
+  severityBias: number;
+}[] = [
+  { name: "Turk & Taylor / Turk & Hyde (Tenderloin core)", center: { lat: 37.7834, lng: -122.4142 }, points: 15, spreadMeters: 170, severityBias: 0.82 },
+  { name: "Eddy & Jones (Tenderloin)", center: { lat: 37.7846, lng: -122.414 }, points: 14, spreadMeters: 150, severityBias: 0.8 },
+  { name: "Golden Gate Ave between Jones and Leavenworth", center: { lat: 37.7813, lng: -122.4147 }, points: 14, spreadMeters: 160, severityBias: 0.78 },
+  { name: "6th St between Market and Howard (SoMa)", center: { lat: 37.7815, lng: -122.4096 }, points: 15, spreadMeters: 180, severityBias: 0.8 },
+  { name: "16th St & Mission (BART plaza)", center: { lat: 37.7648, lng: -122.4198 }, points: 15, spreadMeters: 160, severityBias: 0.82 },
+  { name: "24th St & Mission", center: { lat: 37.7523, lng: -122.4183 }, points: 15, spreadMeters: 160, severityBias: 0.82 },
+  { name: "Civic Center Plaza / UN Plaza", center: { lat: 37.7799, lng: -122.4156 }, points: 15, spreadMeters: 180, severityBias: 0.8 },
+  { name: "3rd St between Palou and Oakdale (Bayview)", center: { lat: 37.737, lng: -122.3891 }, points: 15, spreadMeters: 170, severityBias: 0.82 },
+  { name: "Jones & Ellis (Tenderloin)", center: { lat: 37.7857, lng: -122.414 }, points: 14, spreadMeters: 150, severityBias: 0.8 },
+  { name: "Leavenworth & O'Farrell", center: { lat: 37.7869, lng: -122.4153 }, points: 14, spreadMeters: 150, severityBias: 0.78 },
+  { name: "Hyde & McAllister", center: { lat: 37.7809, lng: -122.4167 }, points: 14, spreadMeters: 150, severityBias: 0.78 },
+  { name: "Mid-Market, Market St between 5th and 8th", center: { lat: 37.7807, lng: -122.4113 }, points: 15, spreadMeters: 180, severityBias: 0.8 },
+  { name: "Harrison St underpass near 4th/5th (SoMa)", center: { lat: 37.7797, lng: -122.4013 }, points: 14, spreadMeters: 170, severityBias: 0.78 },
+  { name: "Sunnydale/Visitacion Valley near Blythdale Ave", center: { lat: 37.7135, lng: -122.4079 }, points: 15, spreadMeters: 170, severityBias: 0.82 },
+  { name: "Bayview, Third St between Palou and Fitzgerald", center: { lat: 37.731, lng: -122.3895 }, points: 17, spreadMeters: 160, severityBias: 0.85 },
+];
+
+/**
+ * Name + location only (no synthetic-crash-generation params) - the public,
+ * lightweight view of `KNOWN_DANGEROUS_LOCATIONS` used to report *which*
+ * named area a route avoided (see `summarizeNeighborhoodsAvoided` in
+ * `lib/routing.ts`), rather than just an opaque `zone-N` id.
+ */
+export const NAMED_DANGEROUS_LOCATIONS: NamedDangerLocation[] = KNOWN_DANGEROUS_LOCATIONS.map((loc) => ({
+  name: loc.name,
+  center: loc.center,
+}));
 
 const INCIDENT_TYPES: IncidentType[] = ["collision", "nearmiss", "hazard", "theft"];
 const INCIDENT_WEIGHTS = [0.45, 0.3, 0.2, 0.05]; // rough distribution
@@ -140,10 +195,11 @@ function buildCrash(base: { lat: number; lng: number }, spreadMeters: number, se
   };
 }
 
-export const MOCK_CRASHES: CrashRecord[] = HAZARD_CLUSTERS.flatMap((cluster) =>
-  Array.from({ length: cluster.points }, () =>
-    buildCrash(cluster.center, cluster.spreadMeters, cluster.severityBias)
-  )
+export const MOCK_CRASHES: CrashRecord[] = [...HAZARD_CLUSTERS, ...KNOWN_DANGEROUS_LOCATIONS].flatMap(
+  (cluster) =>
+    Array.from({ length: cluster.points }, () =>
+      buildCrash(cluster.center, cluster.spreadMeters, cluster.severityBias)
+    )
 );
 
 // A handful of scattered low-density background incidents so the whole city
@@ -157,108 +213,12 @@ export const MOCK_BACKGROUND_CRASHES: CrashRecord[] = Array.from({ length: 20 },
 export const ALL_MOCK_CRASHES: CrashRecord[] = [...MOCK_CRASHES, ...MOCK_BACKGROUND_CRASHES];
 
 // ---------------------------------------------------------------------------
-// Bike lane infrastructure (mocked tiers, standing in for a real city GIS
-// bike-network layer or OSM `cycleway` tags)
-// ---------------------------------------------------------------------------
-
-export const MOCK_BIKE_LANE_SEGMENTS: BikeLaneSegment[] = [
-  {
-    id: "bike-valencia",
-    name: "Valencia St protected bikeway",
-    tier: "fullyProtected",
-    path: [
-      { lat: 37.7599, lng: -122.4210 },
-      { lat: 37.7550, lng: -122.4206 },
-      { lat: 37.7480, lng: -122.4200 },
-      { lat: 37.7410, lng: -122.4193 },
-    ],
-  },
-  {
-    id: "bike-jfk",
-    name: "JFK Drive (Golden Gate Park, car-free promenade)",
-    tier: "fullyProtected",
-    path: [
-      { lat: 37.7719, lng: -122.4550 },
-      { lat: 37.7699, lng: -122.4610 },
-      { lat: 37.7690, lng: -122.4680 },
-    ],
-  },
-  {
-    id: "bike-2nd-st",
-    name: "2nd St protected bikeway",
-    tier: "fullyProtected",
-    path: [
-      { lat: 37.7920, lng: -122.3946 },
-      { lat: 37.7840, lng: -122.3960 },
-      { lat: 37.7780, lng: -122.3972 },
-    ],
-  },
-  {
-    id: "bike-market",
-    name: "Market St (center-running transit + bike lane)",
-    tier: "semiProtected",
-    path: [
-      { lat: 37.7936, lng: -122.3959 },
-      { lat: 37.7830, lng: -122.4070 },
-      { lat: 37.7746, lng: -122.4243 },
-      { lat: 37.7699, lng: -122.4330 },
-    ],
-  },
-  {
-    id: "bike-folsom",
-    name: "Folsom St buffered bike lane",
-    tier: "semiProtected",
-    path: [
-      { lat: 37.7870, lng: -122.3930 },
-      { lat: 37.7799, lng: -122.4013 },
-      { lat: 37.7735, lng: -122.4090 },
-    ],
-  },
-  {
-    id: "bike-townsend",
-    name: "Townsend St buffered bike lane",
-    tier: "semiProtected",
-    path: [
-      { lat: 37.7787, lng: -122.3945 },
-      { lat: 37.7770, lng: -122.4010 },
-      { lat: 37.7755, lng: -122.4070 },
-    ],
-  },
-  {
-    id: "bike-wiggle",
-    name: "The Wiggle (Scott/Fell/Oak/Steiner, paint-only)",
-    tier: "unprotected",
-    path: [
-      { lat: 37.7726, lng: -122.4384 },
-      { lat: 37.7715, lng: -122.4350 },
-      { lat: 37.7700, lng: -122.4310 },
-    ],
-  },
-  {
-    id: "bike-polk",
-    name: "Polk St painted lane",
-    tier: "unprotected",
-    path: [
-      { lat: 37.7920, lng: -122.4210 },
-      { lat: 37.7850, lng: -122.4213 },
-      { lat: 37.7790, lng: -122.4216 },
-    ],
-  },
-  {
-    id: "bike-cabrillo",
-    name: "Cabrillo St sharrow/painted lane",
-    tier: "unprotected",
-    path: [
-      { lat: 37.7742, lng: -122.4620 },
-      { lat: 37.7742, lng: -122.4520 },
-      { lat: 37.7742, lng: -122.4440 },
-    ],
-  },
-];
-
-// ---------------------------------------------------------------------------
 // Freeways and dangerous arterials (mocked line segments; a real integration
 // would pull these from OSM `highway=motorway` / `highway=primary` tags)
+//
+// Bike-lane infrastructure is no longer mocked here - see
+// `lib/dataSources/sfmtaBikeLanes.ts` for the real SFMTA bike-network data
+// that replaced it.
 // ---------------------------------------------------------------------------
 
 export const MOCK_HIGHWAY_SEGMENTS: HighwaySegment[] = [

@@ -50,6 +50,8 @@ Runs the Vitest unit test suite (`lib/**/*.test.ts`).
 ## Project status
 
 This project is being built in phases - see `ARCHITECTURE.md`'s build log
-for what currently exists. Crash/bike-lane/highway data is currently mock
-data shaped to resemble real BikeMaps.org/NHTSA records; see
-`lib/dataSources/bikemaps.ts` for notes on wiring up real data later.
+for what currently exists. Road geometry (OpenStreetMap) and bike-lane
+infrastructure quality (SFMTA's official bike-network data) are real; crash
+and highway/arterial data are currently mock data shaped to resemble real
+BikeMaps.org/NHTSA records - see `lib/dataSources/bikemaps.ts` for notes on
+wiring up real crash data later.
